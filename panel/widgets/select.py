@@ -7,9 +7,10 @@ from __future__ import annotations
 import itertools
 import re
 
+from functools import partial
 from types import FunctionType
 from typing import (
-    TYPE_CHECKING, Any, ClassVar, Mapping,
+    TYPE_CHECKING, Any, Awaitable, Callable, ClassVar, Mapping, Optional,
 )
 
 import numpy as np
@@ -19,13 +20,15 @@ from bokeh.models import PaletteSelect
 from bokeh.models.widgets import (
     AutocompleteInput as _BkAutocompleteInput,
     CheckboxGroup as _BkCheckboxGroup, MultiChoice as _BkMultiChoice,
-    MultiSelect as _BkMultiSelect, RadioGroup as _BkRadioBoxGroup,
+    RadioGroup as _BkRadioBoxGroup,
 )
 
 from ..io.resources import CDN_DIST
+from ..io.state import state
 from ..layout.base import Column, ListPanel, NamedListPanel
 from ..models import (
-    CheckboxButtonGroup as _BkCheckboxButtonGroup, CustomSelect,
+    CheckboxButtonGroup as _BkCheckboxButtonGroup,
+    CustomMultiSelect as _BkMultiSelect, CustomSelect,
     RadioButtonGroup as _BkRadioButtonGroup, SingleSelect as _BkSingleSelect,
 )
 from ..util import PARAM_NAME_PATTERN, indexOf, isIn
@@ -35,7 +38,11 @@ from .button import Button, _ButtonBase
 from .input import TextAreaInput, TextInput
 
 if TYPE_CHECKING:
+    from bokeh.document import Document
     from bokeh.model import Model
+    from pyviz_comms import Comm
+
+    from ..models.widgets import DoubleClickEvent
 
 
 class SelectBase(Widget):
@@ -70,6 +77,10 @@ class SingleSelectBase(SelectBase):
 
     value = param.Parameter(default=None)
 
+    _allows_values: ClassVar[bool] = True
+
+    _allows_none: ClassVar[bool] = False
+
     _supports_embed: ClassVar[bool] = True
 
     __abstract = True
@@ -77,39 +88,44 @@ class SingleSelectBase(SelectBase):
     def __init__(self, **params):
         super().__init__(**params)
         values = self.values
-        if self.value is None and None not in values and values:
+        if self.value is None and None not in values and values and not self._allows_none:
             self.value = values[0]
 
     def _process_param_change(self, msg):
         msg = super()._process_param_change(msg)
         labels, values = self.labels, self.values
-        unique = len(set(self.unicode_values)) == len(labels)
+        unique = len(set(self.unicode_values)) == len(labels) and self._allows_values
         if 'value' in msg:
             val = msg['value']
             if isIn(val, values):
                 unicode_values = self.unicode_values if unique else labels
                 msg['value'] = unicode_values[indexOf(val, values)]
             elif values:
-                self.value = self.values[0]
+                self.value = self.param['value'].default if self._allows_none else self.values[0]
+                if not self._allows_none:
+                    del msg['value']
             else:
-                self.value = None
-                msg['value'] = ''
+                self.value = self.param['value'].default
+                if self._allows_none:
+                    msg['value'] = self.value
 
-        if 'options' in msg:
+        option_prop = self._property_mapping.get('options', 'options')
+        is_list = isinstance(self.param['value'], param.List)
+        if option_prop in msg and not is_list:
             if isinstance(self.options, dict):
-                if unique:
+                if unique and self._allows_values:
                     options = [(v, l) for l,v in zip(labels, self.unicode_values)]
                 else:
                     options = labels
-                msg['options'] = options
+                msg[option_prop] = options
             else:
-                msg['options'] = self.unicode_values
+                msg[option_prop] = self.unicode_values
             val = self.value
             if values:
                 if not isIn(val, values):
-                    self.value = values[0]
+                    self.value = self.param['value'].default if self._allows_none else values[0]
             else:
-                self.value = None
+                self.value = self.param['value'].default
         return msg
 
     @property
@@ -137,8 +153,7 @@ class SingleSelectBase(SelectBase):
             values = self.values
         elif any(v not in self.values for v in values):
             raise ValueError("Supplied embed states were not found "
-                             "in the %s widgets values list." %
-                             type(self).__name__)
+                             f"in the {type(self).__name__} widgets values list.")
         return (self, self._models[root.ref['id']][0], values,
                 lambda x: x.value, 'value', 'cb_obj.value')
 
@@ -785,6 +800,50 @@ class MultiSelect(_MultiSelectBase):
 
     _widget_type: ClassVar[type[Model]] = _BkMultiSelect
 
+    def __init__(self, **params):
+        click_handler = params.pop('on_double_click', None)
+        super().__init__(**params)
+        self._dbl__click_handlers = [click_handler] if click_handler else []
+
+    def _get_model(
+        self, doc: Document, root: Optional[Model] = None,
+        parent: Optional[Model] = None, comm: Optional[Comm] = None
+    ) -> Model:
+        model = super()._get_model(doc, root, parent, comm)
+        self._register_events('dblclick_event', model=model, doc=doc, comm=comm)
+        return model
+
+    def _process_event(self, event: DoubleClickEvent) -> None:
+        if event.option in self.labels:
+            event.option = self._items[event.option]
+            for handler in self._dbl__click_handlers:
+                state.execute(partial(handler, event))
+
+    def on_double_click(
+        self, callback: Callable[[param.parameterized.Event], None | Awaitable[None]]
+    ) -> param.parameterized.Watcher:
+        """
+        Register a callback to be executed when a `MultiSelect` option is double-clicked.
+
+        The callback is given an `DoubleClickEvent` argument
+
+        Example
+        -------
+
+        >>> select = pn.widgets.MultiSelect(options=["A", "B", "C"])
+        >>> def handle_click(event):
+        ...    print(f"Option {event.option} was double clicked.")
+        >>> select.on_double_click(handle_click)
+
+        Arguments
+        ---------
+        callback:
+            The function to run on click events. Must accept a positional `Event` argument. Can
+            be a sync or async function
+        """
+        self._dbl__click_handlers.append(callback)
+
+
 
 class MultiChoice(_MultiSelectBase):
     """
@@ -834,9 +893,9 @@ class MultiChoice(_MultiSelectBase):
     _widget_type: ClassVar[type[Model]] = _BkMultiChoice
 
 
-class AutocompleteInput(Widget):
+class AutocompleteInput(SingleSelectBase):
     """
-    The `MultiChoice` widget allows selecting multiple values from a list of
+    The `AutocompleteInput` widget allows selecting multiple values from a list of
     `options`.
 
     It falls into the broad category of multi-value, option-selection widgets
@@ -863,10 +922,6 @@ class AutocompleteInput(Widget):
         The number of characters a user must type before
         completions are presented.""")
 
-    options = param.List(default=[], doc="""
-        A list of completion strings. This will be used to guide the
-        user upon typing the beginning of a desired value.""")
-
     placeholder = param.String(default='', doc="""
         Placeholder for empty input field.""")
 
@@ -881,7 +936,7 @@ class AutocompleteInput(Widget):
         completion string. Using `"includes"` means that the user's text can
         match any substring of a completion string.""")
 
-    value = param.String(default='', allow_None=True, doc="""
+    value = param.Parameter(default='', allow_None=True, doc="""
       Initial or entered text value updated when <enter> key is pressed.""")
 
     value_input = param.String(default='', allow_None=True, doc="""
@@ -894,16 +949,30 @@ class AutocompleteInput(Widget):
     description = param.String(default=None, doc="""
         An HTML string describing the function of this component.""")
 
+    _allows_values: ClassVar[bool] = False
+
+    _allows_none: ClassVar[bool] = True
+
     _rename: ClassVar[Mapping[str, str | None]] = {'name': 'title', 'options': 'completions'}
 
     _widget_type: ClassVar[type[Model]] = _BkAutocompleteInput
 
+    def _process_property_change(self, msg):
+        if not self.restrict and 'value' in msg:
+            try:
+                return super()._process_property_change(msg)
+            except Exception:
+                return Widget._process_property_change(self, msg)
+        return super()._process_property_change(msg)
+
     def _process_param_change(self, msg):
-        msg = super()._process_param_change(msg)
-        if 'completions' in msg:
-            if self.restrict and not isIn(self.value, msg['completions']):
-                msg['value'] = self.value = ''
-        return msg
+        if 'value' in msg and not self.restrict and not isIn(msg['value'], self.values):
+            with param.parameterized.discard_events(self):
+                props = super()._process_param_change(msg)
+                self.value = props['value'] = msg['value']
+        else:
+            props = super()._process_param_change(msg)
+        return props
 
 
 class _RadioGroupBase(SingleSelectBase):
@@ -954,8 +1023,7 @@ class _RadioGroupBase(SingleSelectBase):
             values = self.values
         elif any(v not in self.values for v in values):
             raise ValueError("Supplied embed states were not found in "
-                             "the %s widgets values list." %
-                             type(self).__name__)
+                             f"the {type(self).__name__} widgets values list.")
         return (self, self._models[root.ref['id']][0], values,
                 lambda x: x.active, 'active', 'cb_obj.active')
 
@@ -1144,7 +1212,6 @@ class ToggleGroup(SingleSelectBase):
     _behaviors = ['check', 'radio']
 
     def __new__(cls, widget_type='button', behavior='check', **params):
-
         if widget_type not in ToggleGroup._widgets_type:
             raise ValueError(f'widget_type {widget_type} is not valid. Valid options are {ToggleGroup._widgets_type}')
         if behavior not in ToggleGroup._behaviors:
@@ -1158,7 +1225,7 @@ class ToggleGroup(SingleSelectBase):
         else:
             if isinstance(params.get('value'), list):
                 raise ValueError('Radio buttons require a single value, '
-                                 'found: %s' % params['value'])
+                                 'found: {}'.format(params['value']))
             if widget_type == 'button':
                 return RadioButtonGroup(**params)
             else:

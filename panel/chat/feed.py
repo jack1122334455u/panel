@@ -10,8 +10,8 @@ import traceback
 
 from enum import Enum
 from inspect import (
-    isasyncgen, isasyncgenfunction, isawaitable, iscoroutinefunction,
-    isgenerator, isgeneratorfunction,
+    getfullargspec, isasyncgen, isasyncgenfunction, isawaitable,
+    iscoroutinefunction, isgenerator, isgeneratorfunction, ismethod,
 )
 from io import BytesIO
 from typing import (
@@ -22,12 +22,16 @@ import param
 
 from .._param import Margin
 from ..io.resources import CDN_DIST
-from ..layout import Feed, ListPanel
+from ..layout import Column, Feed, ListPanel
 from ..layout.card import Card
 from ..layout.spacer import VSpacer
-from ..pane.image import SVG
+from ..pane.image import SVG, ImageBase
+from ..pane.markup import Markdown
+from ..util import to_async_gen
+from ..viewable import Children
 from .icon import ChatReactionIcons
 from .message import ChatMessage
+from .step import ChatStep
 
 if TYPE_CHECKING:
     from bokeh.document import Document
@@ -58,9 +62,10 @@ class StopCallback(Exception):
 
 class ChatFeed(ListPanel):
     """
-    A widget to display a list of `ChatMessage` objects and interact with them.
+    A ChatFeed holds a list of `ChatMessage` objects and provides convenient APIs.
+    to interact with them.
 
-    This widget provides methods to:
+    This includes methods to:
     - Send (append) messages to the chat log.
     - Stream tokens to the latest `ChatMessage` in the chat log.
     - Execute callbacks when a user sends a message.
@@ -102,6 +107,12 @@ class ChatFeed(ListPanel):
     callback_user = param.String(default="Assistant", doc="""
         The default user name to use for the message provided by the callback.""")
 
+    callback_avatar = param.ClassSelector(class_=(str, BytesIO, bytes, ImageBase), doc="""
+        The default avatar to use for the entry provided by the callback.
+        Takes precedence over `ChatMessage.default_avatars` if set; else, if None,
+        defaults to the avatar set in `ChatMessage.default_avatars` if matching key exists.
+        Otherwise defaults to the first character of the `callback_user`.""")
+
     card_params = param.Dict(default={}, doc="""
         Params to pass to Card, like `header`, `header_background`, `header_color`, etc.""")
 
@@ -125,7 +136,7 @@ class ChatFeed(ListPanel):
         be specified as a two-tuple of the form (vertical, horizontal)
         or a four-tuple (top, right, bottom, left).""")
 
-    objects = param.List(default=[], doc="""
+    objects = Children(default=[], doc="""
         The list of child objects that make up the layout.""")
 
     help_text = param.String(default="", doc="""
@@ -346,6 +357,7 @@ class ChatFeed(ListPanel):
         value: dict,
         user: str | None = None,
         avatar: str | bytes | BytesIO | None = None,
+        **input_message_params
     ) -> ChatMessage | None:
         """
         Builds a ChatMessage from the value.
@@ -366,6 +378,7 @@ class ChatFeed(ListPanel):
             message_params["avatar"] = avatar
         if self.width:
             message_params["width"] = int(self.width - 80)
+        message_params.update(input_message_params)
 
         message = ChatMessage(**message_params)
         return message
@@ -386,10 +399,10 @@ class ChatFeed(ListPanel):
             raise StopCallback("Callback was stopped.")
 
         user = self.callback_user
-        avatar = None
+        avatar = self.callback_avatar
         if isinstance(value, dict):
             user = value.get("user", user)
-            avatar = value.get("avatar")
+            avatar = value.get("avatar", avatar)
 
         if message is not None:
             # ChatMessage is already created; updating existing ChatMessage
@@ -426,7 +439,31 @@ class ChatFeed(ListPanel):
             contents = value.value
         else:
             contents = value
-        return contents, message.user, self
+
+        input_kwargs = {
+            "contents": contents,
+            "user": message.user,
+            "instance": self
+        }
+        input_args = tuple(input_kwargs.values())
+        callback_arg_spec = getfullargspec(self.callback)
+        callback_args = callback_arg_spec.args
+        if ismethod(self.callback):
+            callback_args = callback_args[1:]
+        num_args = len(callback_args)
+        if callback_arg_spec.varargs:
+            return input_args, {}
+        elif callback_arg_spec.varkw:
+            args_keys = list(input_kwargs)[:num_args]
+            for arg_key in args_keys:
+                input_kwargs.pop(arg_key)
+            return input_args[:num_args], input_kwargs
+        elif len(callback_args) <= 3:
+            return input_args[:num_args], {}
+        elif len(callback_args) > 3:
+            raise ValueError("Function should have at most 3 arguments")
+        elif len(callback_args) == 0:
+            raise ValueError("Function should have at least one argument")
 
     async def _serialize_response(self, response: Any) -> ChatMessage | None:
         """
@@ -475,34 +512,17 @@ class ChatFeed(ListPanel):
                 return
             await asyncio.sleep(0.1)
 
-    async def _to_async_gen(self, sync_gen):
-        done = object()
-
-        def safe_next():
-            # Converts StopIteration to a sentinel value to avoid:
-            # TypeError: StopIteration interacts badly with generators and cannot be raised into a Future
-            try:
-                return next(sync_gen)
-            except StopIteration:
-                return done
-
-        while True:
-            value = await asyncio.to_thread(safe_next)
-            if value is done:
-                break
-            yield value
-
     async def _handle_callback(self, message, loop: asyncio.BaseEventLoop):
-        callback_args = self._gather_callback_args(message)
+        callback_args, callback_kwargs = self._gather_callback_args(message)
         if iscoroutinefunction(self.callback):
-            response = await self.callback(*callback_args)
+            response = await self.callback(*callback_args, **callback_kwargs)
         elif isasyncgenfunction(self.callback):
-            response = self.callback(*callback_args)
+            response = self.callback(*callback_args, **callback_kwargs)
         elif isgeneratorfunction(self.callback):
-            response = self._to_async_gen(self.callback(*callback_args))
+            response = to_async_gen(self.callback(*callback_args, **callback_kwargs))
             # printing type(response) -> <class 'async_generator'>
         else:
-            response = await asyncio.to_thread(self.callback, *callback_args)
+            response = await asyncio.to_thread(self.callback, *callback_args, **callback_kwargs)
         await self._serialize_response(response)
         return response
 
@@ -568,6 +588,7 @@ class ChatFeed(ListPanel):
         user: str | None = None,
         avatar: str | bytes | BytesIO | None = None,
         respond: bool = True,
+        **message_params
     ) -> ChatMessage | None:
         """
         Sends a value and creates a new message in the chat log.
@@ -584,6 +605,8 @@ class ChatFeed(ListPanel):
             The avatar to use; overrides the message message's avatar if provided.
         respond : bool
             Whether to execute the callback.
+        message_params : dict
+            Additional parameters to pass to the ChatMessage.
 
         Returns
         -------
@@ -599,7 +622,7 @@ class ChatFeed(ListPanel):
         else:
             if not isinstance(value, dict):
                 value = {"object": value}
-            message = self._build_message(value, user=user, avatar=avatar)
+            message = self._build_message(value, user=user, avatar=avatar, **message_params)
         self.append(message)
         self.param.trigger("_post_hook_trigger")
         if respond:
@@ -613,6 +636,7 @@ class ChatFeed(ListPanel):
         avatar: str | bytes | BytesIO | None = None,
         message: ChatMessage | None = None,
         replace: bool = False,
+        **message_params
     ) -> ChatMessage | None:
         """
         Streams a token and updates the provided message, if provided.
@@ -635,6 +659,8 @@ class ChatFeed(ListPanel):
             The message to update.
         replace : bool
             Whether to replace the existing text when streaming a string or dict.
+        message_params : dict
+            Additional parameters to pass to the ChatMessage.
 
         Returns
         -------
@@ -657,6 +683,9 @@ class ChatFeed(ListPanel):
                     message.avatar = avatar
             else:
                 message.update(value, user=user, avatar=avatar)
+
+            if message_params:
+                message.param.update(**message_params)
             return message
 
         if isinstance(value, ChatMessage):
@@ -664,11 +693,72 @@ class ChatFeed(ListPanel):
         else:
             if not isinstance(value, dict):
                 value = {"object": value}
-            message = self._build_message(value, user=user, avatar=avatar)
+            message = self._build_message(value, user=user, avatar=avatar, **message_params)
         self._replace_placeholder(message)
 
         self.param.trigger("_post_hook_trigger")
         return message
+
+    def add_step(
+        self,
+        step: str | list[str] | ChatStep | None = None,
+        append: bool = True,
+        user: str | None = None,
+        avatar: str | bytes | BytesIO | None = None,
+        **step_params
+    ) -> ChatStep:
+        """
+        Adds a ChatStep component either by appending it to an existing
+        ChatMessage or creating a new ChatMessage.
+
+        Arguments
+        ---------
+        step : str | list(str) | ChatStep | None
+            The objects to stream to the step.
+        append : bool
+            Whether to append to existing steps or create new steps.
+        user : str | None
+            The user to stream as; overrides the message's user if provided.
+            Will default to the user parameter. Only applicable if steps is "new".
+        avatar : str | bytes | BytesIO | None
+            The avatar to use; overrides the message's avatar if provided.
+            Will default to the avatar parameter. Only applicable if steps is "new".
+        step_params : dict
+            Parameters to pass to the ChatStep.
+        """
+        if not isinstance(step, ChatStep):
+            if step is None:
+                step = []
+            elif not isinstance(step, list):
+                step = [step]
+            step_params["objects"] = [
+                (
+                    Markdown(obj, css_classes=["step-message"])
+                    if isinstance(obj, str)
+                    else obj
+                )
+                for obj in step
+            ]
+            step = ChatStep(**step_params)
+        steps_column = None
+        if append:
+            last = self._chat_log[-1] if self._chat_log else None
+            if last is not None and isinstance(last.object, Column) and (
+                    all(isinstance(o, ChatStep) for o in last.object) or
+                    last.object.css_classes == 'chat-steps'
+            ) and (user is None or last.user == user):
+                steps_column = last.object
+        if steps_column is None:
+            steps_column = Column(
+                step, css_classes=["chat-steps"], styles={
+                    'max-width': 'calc(100% - 30px)',
+                    'padding-block': '0px'
+                }
+            )
+            self.stream(steps_column, user=user, avatar=avatar)
+        else:
+            steps_column.append(step)
+        return step
 
     def respond(self):
         """
@@ -801,6 +891,7 @@ class ChatFeed(ListPanel):
         filter_by: Callable | None = None,
         format: Literal["transformers"] = "transformers",
         custom_serializer: Callable | None = None,
+        limit: int | None = None,
         **serialize_kwargs
     ):
         """
@@ -821,6 +912,8 @@ class ChatFeed(ListPanel):
             A custom function to format the ChatMessage's object. The function must
             accept one positional argument, the ChatMessage object, and return a string.
             If not provided, uses the serialize method on ChatMessage.
+        limit : int
+            The number of messages to serialize at most, starting from the last message.
         **serialize_kwargs
             Additional keyword arguments to use for the specified format.
 
@@ -844,8 +937,11 @@ class ChatFeed(ListPanel):
         else:
             exclude_users = [user.lower() for user in exclude_users]
 
+        objects = self._chat_log.objects
+        if limit is not None:
+            objects = objects[-limit:]
         messages = [
-            message for message in self._chat_log.objects
+            message for message in objects
             if message.user.lower() not in exclude_users
             and message is not self._placeholder
         ]

@@ -25,12 +25,10 @@ from pyviz_comms import (
     JupyterCommManager as _JupyterCommManager, extension as _pyviz_extension,
 )
 
+from .__version import __version__
 from .io.logging import panel_log_handler
 from .io.state import state
 from .util import param_watchers
-
-__version__ = str(param.version.Version(
-    fpath=__file__, archive_commit="$Format:%h$", reponame="panel"))
 
 _LOCAL_DEV_VERSION = (
     any(v in __version__ for v in ('post', 'dirty'))
@@ -665,6 +663,7 @@ class panel_extension(_pyviz_extension):
         'codeeditor': 'panel.models.ace',
         'deckgl': 'panel.models.deckgl',
         'echarts': 'panel.models.echarts',
+        'filedropper': 'panel.models.file_dropper',
         'ipywidgets': 'panel.io.ipywidget',
         'jsoneditor': 'panel.models.jsoneditor',
         'katex': 'panel.models.katex',
@@ -685,6 +684,7 @@ class panel_extension(_pyviz_extension):
     _globals = {
         'deckgl': ['deck'],
         'echarts': ['echarts'],
+        'filedropper': ['FilePond'],
         'floatpanel': ['jsPanel'],
         'gridstack': ['GridStack'],
         'katex': ['katex'],
@@ -748,8 +748,8 @@ class panel_extension(_pyviz_extension):
                     state._extensions.append(arg)
                 ReactiveHTMLMetaclass._loaded_extensions.add(arg)
             else:
-                self.param.warning('%s extension not recognized and '
-                                   'will be skipped.' % arg)
+                self.param.warning(f'{arg} extension not recognized and '
+                                   'will be skipped.')
 
         for k, v in params.items():
             if k == 'design' and isinstance(v, str):

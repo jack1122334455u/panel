@@ -150,7 +150,9 @@ export class PerspectiveView extends HTMLBoxView {
   }
 
   override remove(): void {
-    this.perspective_element.delete(() => this.worker.terminate())
+    if (this.perspective_element) {
+      this.perspective_element.delete(() => this.worker.terminate())
+    }
     super.remove()
   }
 
@@ -164,7 +166,7 @@ export class PerspectiveView extends HTMLBoxView {
     const container = div({
       class: "pnx-perspective-viewer",
       style: {
-        zIndex: 0,
+        zIndex: "0",
       },
     })
     this._current_plugin = this.model.plugin
