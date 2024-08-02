@@ -1,0 +1,14 @@
+<map id="inheritance7435272304" name="inheritance7435272304">
+<area shape="rect" id="node1" title="Base class for all class types that have Bokeh properties." alt="" coords="208,124,334,140"/>
+<area shape="rect" id="node5" title="Base class for all objects stored in Bokeh |Document| instances." alt="" coords="411,79,514,95"/>
+<area shape="rect" id="node2" title="A mixin for making a type serializable." alt="" coords="3,124,140,140"/>
+<area shape="rect" id="node3" title="Base class for all Bokeh events." alt="" coords="31,3,113,19"/>
+<area shape="rect" id="node4" title="Base class for all Bokeh Model events." alt="" coords="219,3,323,19"/>
+<area shape="rect" id="node12" href="#panel.models.plotly.PlotlyEvent" target="_top" title="panel.models.plotly.PlotlyEvent" alt="" coords="402,3,523,19"/>
+<area shape="rect" id="node11" title="Base class for user interface elements." alt="" coords="552,79,701,95"/>
+<area shape="rect" id="node7" title="A mixin class to provide an interface for registering and" alt="" coords="169,64,373,80"/>
+<area shape="rect" id="node8" title="A mixin class to provide an interface for registering and" alt="" coords="174,94,368,110"/>
+<area shape="rect" id="node9" title="The base class for layoutable components." alt="" coords="872,79,1005,95"/>
+<area shape="rect" id="node13" href="#panel.models.plotly.PlotlyPlot" target="_top" title="A bokeh model that wraps around a plotly plot and renders it inside" alt="" coords="1034,79,1149,95"/>
+<area shape="rect" id="node10" title="A UI element that can hold other DOM&#45;based UI elements." alt="" coords="730,79,843,95"/>
+</map>
